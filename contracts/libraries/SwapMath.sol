@@ -88,10 +88,16 @@ library SwapMath {
             amountOut = uint256(-amountRemaining);
         }
 
+        //NOTE:计算swapFee
         if (exactIn && sqrtRatioNextX96 != sqrtRatioTargetX96) {
+            // ain < max amount in 也就是 sqrtRatioNextX96 != sqrtRatioTargetX96
             // we didn't reach the target, so take the remainder of the maximum input as fee
+            // fee= A -ain
             feeAmount = uint256(amountRemaining) - amountIn;
         } else {
+            //ain = A -fee = A - Af= A(1-f)
+            //A= ain/(1-f)
+            //fee=Af = ain*f(1-f)
             feeAmount = FullMath.mulDivRoundingUp(amountIn, feePips, 1e6 - feePips);
         }
     }
