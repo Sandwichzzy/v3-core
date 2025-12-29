@@ -316,7 +316,11 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
         checkTicks(params.tickLower, params.tickUpper);
 
         Slot0 memory _slot0 = slot0; // SLOAD for gas optimization
-
+        // 负责更新用户的流动性头寸，包括：
+        //    1. 更新tick点的流动性状态
+        //    2. 计算和更新费用累积
+        //    3. 管理tick位图
+        //    4. 清理不再需要的tick数据
         position = _updatePosition(
             params.owner,
             params.tickLower,
@@ -324,11 +328,14 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
             params.liquidityDelta,
             _slot0.tick
         );
-
+        //如果流动性变化量不为0
         if (params.liquidityDelta != 0) {
+            //根据当前价格位置计算代币数量
             if (_slot0.tick < params.tickLower) {
                 // current tick is below the passed range; liquidity can only become in range by crossing from left to
                 // right, when we'll need _more_ token0 (it's becoming more valuable) so user must provide it
+                // 当前价格在区间下方; 流动性只能通过价格从左到右穿越区间时激活
+                // 只需要提供token0
                 amount0 = SqrtPriceMath.getAmount0Delta(
                     TickMath.getSqrtRatioAtTick(params.tickLower),
                     TickMath.getSqrtRatioAtTick(params.tickUpper),
@@ -336,9 +343,10 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                 );
             } else if (_slot0.tick < params.tickUpper) {
                 // current tick is inside the passed range
+                // 当前价格在区间内
                 uint128 liquidityBefore = liquidity; // SLOAD for gas optimization
 
-                // write an oracle entry
+                // 写入预言机数据
                 (slot0.observationIndex, slot0.observationCardinality) = observations.write(
                     _slot0.observationIndex,
                     _blockTimestamp(),
@@ -347,7 +355,7 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                     _slot0.observationCardinality,
                     _slot0.observationCardinalityNext
                 );
-
+                // 计算两种代币的数量
                 amount0 = SqrtPriceMath.getAmount0Delta(
                     _slot0.sqrtPriceX96,
                     TickMath.getSqrtRatioAtTick(params.tickUpper),
@@ -358,11 +366,13 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                     _slot0.sqrtPriceX96,
                     params.liquidityDelta
                 );
-
+                // 更新全局流动性
                 liquidity = LiquidityMath.addDelta(liquidityBefore, params.liquidityDelta);
             } else {
                 // current tick is above the passed range; liquidity can only become in range by crossing from right to
                 // left, when we'll need _more_ token1 (it's becoming more valuable) so user must provide it
+                //当前价格高于区间; 流动性只能通过价格从右到左穿越区间时激活
+                // 只需要提供token1（因为token1相对更有价值）
                 amount1 = SqrtPriceMath.getAmount1Delta(
                     TickMath.getSqrtRatioAtTick(params.tickLower),
                     TickMath.getSqrtRatioAtTick(params.tickUpper),
@@ -384,16 +394,20 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
         int128 liquidityDelta,
         int24 tick
     ) private returns (Position.Info storage position) {
+        //获取头寸和费用数据
         position = positions.get(owner, tickLower, tickUpper);
 
         uint256 _feeGrowthGlobal0X128 = feeGrowthGlobal0X128; // SLOAD for gas optimization
         uint256 _feeGrowthGlobal1X128 = feeGrowthGlobal1X128; // SLOAD for gas optimization
 
         // if we need to update the ticks, do it
+        //  更新Tick状态（当流动性变化时)
         bool flippedLower;
         bool flippedUpper;
         if (liquidityDelta != 0) {
             uint32 time = _blockTimestamp();
+            //tickCumulative: 累积tick值（用于计算时间加权平均价格） secondsPerLiquidityCumulativeX128: 累积的每流动性秒数
+            //更新预言机相关数据
             (int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128) =
                 observations.observeSingle(
                     time,
@@ -403,7 +417,8 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                     liquidity,
                     slot0.observationCardinality
                 );
-
+            //返回是否"翻转"（从有流动性变为无流动性，或反之）
+            // ticks.update会更新liquidityGross和 liquidityNet
             flippedLower = ticks.update(
                 tickLower,
                 tick,
@@ -428,7 +443,9 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                 true,
                 maxLiquidityPerTick
             );
-
+            //位图管理：
+            //当tick从无流动性变为有流动性时，在位图中标记该tick
+            //位图用于快速查找下一个活跃的tick点
             if (flippedLower) {
                 tickBitmap.flipTick(tickLower, tickSpacing);
             }
@@ -436,13 +453,14 @@ contract UniswapV3Pool is IUniswapV3Pool, NoDelegateCall {
                 tickBitmap.flipTick(tickUpper, tickSpacing);
             }
         }
-
+        //算该价格区间的累积的流动性手续费
         (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) =
             ticks.getFeeGrowthInside(tickLower, tickUpper, tick, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128);
-
+        // 更新头寸信息
         position.update(liquidityDelta, feeGrowthInside0X128, feeGrowthInside1X128);
 
         // clear any tick data that is no longer needed
+        //当tick从有流动性变为无流动性时，从位图中清除该tick (ticks.clear)
         if (liquidityDelta < 0) {
             if (flippedLower) {
                 ticks.clear(tickLower);
